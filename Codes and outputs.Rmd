@@ -1,0 +1,610 @@
+---
+title: "Cardiology Patient Records Analysis"
+author: "Claire Jiaying Wu"
+date: "22 Feb 2019"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+```
+
+```{r libraries}
+library(prettydoc)
+library(data.table)
+library(DT)
+```
+
+
+```{r source_code}
+
+```
+
+```{r constants}
+data.file <- "../homework 2/Data/Homework 2 Data.csv"
+num.lines <- 1000
+one.year <- 365.25
+max.age <- 110
+
+id.name <- "id"
+t1.name <- "begin"
+t2.name <- "end"
+age.name <- "age"
+diabetes.name <- "diabetes"
+hypertension.name <- "hypertension"
+kidney.disease.name <- "kidney_disease"
+ace.name <- "ace"
+beta.blocker.name <- "beta.blocker"
+statin.name <- "statin"
+hospital.name <- "hospital"
+heart.attack.name <- "heart.attack"
+death.name <- "death"
+
+```
+
+```{r functions}
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x <- round(x = x, digits = digits)
+  }
+  return(x)
+}
+
+id.panel.overlaps.one.patient <- function(patient.dat, id.name, t1.name, t2.name, row.index.name) {
+  require(data.table)
+  setDT(patient.dat)
+  beginning.times <- patient.dat[, get(t1.name)]
+  ending.times <- patient.dat[, get(t2.name)]
+  overlapping.results <- patient.dat[, .(has_overlap = sum((get(t1.name) >
+  beginning.times & get(t1.name) < ending.times) | (get(t2.name) < beginning.times &
+  get(t2.name) > ending.times)) > 0), by = row.index.name]
+  overlapping.true.false <- overlapping.results[, sum(has_overlap) > 0]
+  return(overlapping.true.false)
+}
+
+id.panel.overlaps <- function(dat, id.name, t1.name, t2.name){
+  require(data.table)
+  setDT(dat)
+  setorderv(x = dat, cols = c(id.name, t1.name), order = 1)
+  dat[, record.index := 1:.N, by = id.name]
+  ids.with.overlaps <- dat[, .(V1 = id.panel.overlaps.one.patient(patient.dat = .SD, 
+                                                                  id.name = id.name, t1.name = t1.name, t2.name = t2.name,
+  row.index.name = "record.index")), by = get(id.name)]
+  setnames(x = ids.with.overlaps, old = c("get", "V1"), new = c(id.name, "overlapping_panels"))
+  return(ids.with.overlaps)
+}
+
+identify.panel.gaps.one.patient <- function(patient.dat, t1.name, t2.name, first.value = 0, expected.gap.between = 0) {
+  require(data.table)
+  setDT(patient.dat)
+  gap.first.row <- (patient.dat[1, get(t1.name) > first.value])
+  n <- patient.dat[, .N]
+  if (n == 1) {
+    res <- gap.first.row
+    }
+  if (n > 1) {
+    t2.values <- patient.dat[1:(n - 1), get(t2.name)]
+    gaps.other.rows <- patient.dat[2:n, get(t1.name) > t2.values + expected.gap.between]
+    res <- c(gap.first.row, gaps.other.rows)
+    }
+  return(res)
+}
+
+identify.panel.gaps <- function(dat, id.name, t1.name, t2.name, gap.name = "gap_before", first.value = 0, expected.gap.between = 0) {
+  require(data.table)
+  setDT(dat)
+  setorderv(x = dat, cols = c(id.name, t1.name), order = 1)
+  dat[, `:=`(eval(gap.name), identify.panel.gaps.one.patient(patient.dat = .SD, t1.name = t1.name, t2.name = t2.name)), 
+  by = get(id.name)]
+  return(dat[])
+}
+
+count.hospitalization <- function(x) {
+  index <- which(x == 1 & c(0, x[1:(length(x)-1)]) != 1)
+  return(length(index))
+}
+
+sum.usage.positive <- function(dat, colname){
+  return(
+    dat[get(colname)==1, .(`Medication Usage` = paste(colname, "- taking"), 
+                           `Deaths Count` = sum(get(death.name), na.rm = TRUE),
+                           `Heart Attacks Count` = sum(get(heart.attack.name), na.rm = TRUE),
+                           `Hospitalization Count` = sum(get(hospital.name), na.rm = TRUE))]
+  )
+}
+
+sum.usage.negative <- function(dat, colname){
+  return(
+    dat[get(colname)==0, .(`Medication Usage` = paste(colname, "- not taking"),
+                           `Deaths Count` = sum(get(death.name), na.rm = TRUE),
+                           `Heart Attacks Count` = sum(get(heart.attack.name), na.rm = TRUE),
+                           `Hospitalization Count` = sum(get(hospital.name), na.rm = TRUE))]
+  )
+}
+
+utilization <- function(dat, colname){
+  with_med <- dat[get(colname)==1, sum(get(t2.name)-get(t1.name))/one.year, by = id.name]
+  without_med <- dat[get(colname)==0, sum(get(t2.name)-get(t1.name))/one.year, by = id.name]
+  total_followup <- dat[, sum(get(t2.name)-get(t1.name))/one.year, by = id.name]
+  overall <- dat[, .("Medicine" = eval(colname), 
+                     "With-medicine Person-year" = sum(with_med$V1),
+                     "Without-medicine Person-year" = sum(without_med$V1),
+                     "Gap Person-year" = sum(total_followup$V1) - (sum(with_med$V1) + sum(without_med$V1)))]
+  return(overall[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_event <- function(dat, colname){
+  total_event <- dat[, sum(get(colname)), by = id.name]
+  followup_time <- dat[, (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_ace <- function(dat, colname){
+  followup_time <- dat[get(ace.name) == 1, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(ace.name) == 1, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("With", ace.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_no_ace <- function(dat, colname){
+  followup_time <- dat[get(ace.name) == 0, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(ace.name) == 0, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("Without", ace.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_beta <- function(dat, colname){
+  followup_time <- dat[get(beta.blocker.name) == 1, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(beta.blocker.name) == 1, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("With", beta.blocker.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_no_beta <- function(dat, colname){
+  followup_time <- dat[get(beta.blocker.name) == 0, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(beta.blocker.name) == 0, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("Without", beta.blocker.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_sta <- function(dat, colname){
+  followup_time <- dat[get(statin.name) == 1, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(statin.name) == 1, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("With", statin.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+
+crude_no_sta <- function(dat, colname){
+  followup_time <- dat[get(statin.name) == 0, 
+                       (sum(get(t2.name)-get(t1.name))/one.year)/100, by = id.name]
+  total_event <- dat[get(statin.name) == 0, sum(get(colname)), by = id.name]
+  dat2 <- dat[, .("Outcomes" = eval(colname),
+                  "Medication" = paste("Without", statin.name),
+                  "Nubmer of Events" = sum(total_event$V1),
+                  "Overall Follow-up Time (by units of 100 years)" = sum(followup_time$V1),
+                  "Crude Rate" = sum(total_event$V1)/ sum(followup_time$V1))]
+  return(dat2[, lapply(X = .SD, FUN = "round.numerics", digits = 1)])
+}
+```
+
+```{r read_data, echo = FALSE}
+question.counter = 0
+```
+
+```{r question1, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Reading the Data
+
+```{r read in the data}
+dat <- fread(input = data.file, verbose = FALSE)
+num.lines <- 1000
+datatable(data = dat[1:num.lines], rownames = TRUE)
+```
+
+Correct the time of death for the patients:
+
+```{r correct_time_of_death}
+dat <- dat[death == 1, begin := as.integer(end - 1)]
+```
+
+- How many rows are there?
+
+```{r num_rows}
+dat[, .N]
+```
+
+- How many columns?
+
+```{r num_cols}
+ncol(dat)
+```
+
+- How many unique patients are there?
+
+```{r num_unique_patients}
+dat[, .(`Unique Patients` = length(unique(get(id.name))), `Number of Rows` = .N)]
+```
+
+- What are the names of the columns?  Do they match up with our description of the data set?
+
+```{r colnames}
+names(dat)
+```
+The column names above match up with the dataset description.
+
+
+```{r question2, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Inspection and Cleaning
+
+### Checking `r t1.name`
+```{r begin_check}
+# checking the missing values
+dat[sum(is.na(t1.name)), .N]
+
+# checking if the beginning times have nagetives or are equal to / greater than the ending times
+dat[get(t1.name) < 0 | get(t1.name) >= get(t2.name), .N]
+```
+
+### Checking `r t2.name`
+```{r end_check}
+# checking the missing values
+dat[sum(is.na(t2.name)), .N]
+
+# checking if the ending times have nagetives
+dat[get(t2.name) < 0, .N]
+```
+
+```{r overlap_check}
+# investigating if there are overlapping time frames
+overlaps <- id.panel.overlaps(dat, id.name, t1.name, t2.name)
+overlaps[overlapping_panels == TRUE, .N]
+```
+
+```{r gap_check}
+# investigating if there are gaps within time frames
+gaps <- identify.panel.gaps(dat, id.name, t1.name, t2.name)
+gaps[gap_before == TRUE & get(t1.name) != get(t2.name), .N]
+```
+
+### Checking `r age.name`
+```{r check_age}
+# checking the missing values
+dat[sum(is.na(age.name)), .N]
+```
+
+```{r}
+# checking basic statistical summary
+dat[, summary(get(age.name))]
+```
+
+### Checking `r diabetes.name`
+
+```{r check_diabetes}
+# checking the missing values
+dat[sum(is.na(diabetes.name)), .N]
+```
+
+### Checking `r hypertension.name`
+
+```{r check_hypertension}
+# checking the missing values
+dat[sum(is.na(hypertension.name)), .N]
+```
+
+### Checking `r kidney.disease.name`
+
+```{r check_kidney_disease}
+# checking the missing values
+dat[sum(is.na(kidney.disease.name)), .N]
+```
+
+### Checking `r ace.name`
+
+```{r check_ace}
+# checking the missing values
+dat[sum(is.na(ace.name)), .N]
+```
+
+### Checking `r beta.blocker.name`
+
+```{r check_beta_blocker}
+# checking the missing values
+dat[sum(is.na(beta.blocker.name)), .N]
+```
+
+### Checking `r statin.name`
+
+```{r check_statin}
+# checking the missing values
+dat[sum(is.na(statin.name)), .N]
+```
+
+### Checking `r hospital.name`
+
+```{r check_hospital}
+# checking the missing values
+dat[sum(is.na(hospital.name)), .N]
+```
+
+### Checking `r heart.attack.name`
+
+```{r check_heart.attack}
+# checking the missing values
+dat[sum(is.na(heart.attack.name)), .N]
+```
+
+### Checking `r death.name`
+
+```{r check_death}
+# checking the missing values
+dat[sum(is.na(death.name)), .N]
+```
+
+```{r check_data_type}
+# checking the data type of each variable
+str(dat)
+```
+After checking, the data types for `r beta.blocker.name` and `r statin.name` are character, while they should be integer. Further checks are in need.
+
+For `r beta.blocker.name`: 
+```{r}
+dat[, sort(unique(get(beta.blocker.name)))]
+```
+Cleaning the characters to integers:
+```{r}
+positive <- c("Filled", "Picked up", "True", "Utilized", "yeah", "yes", "Yes")
+negative <- c("didn't take", "False", "N", "no", "No", "nope", "Not filled")
+
+ps <- which(dat[, beta.blocker] %in% positive)
+ng <- which(dat[, beta.blocker] %in% negative)
+
+dat <- dat[ps, beta.blocker := 1]
+dat <- dat[ng, beta.blocker := 0]
+
+dat <- dat[, beta.blocker := as.numeric(beta.blocker)]
+dat[, is.numeric(beta.blocker)]
+dat[, sort(unique(beta.blocker))]
+```
+
+For `r statin.name`:
+```{r}
+dat[, sort(unique(get(statin.name)))]
+```
+
+Cleaning the characters to integers:
+
+Since the records other than "0" and "1" are hard to be categorized to yes or no, and there are only 276 rows (0.011% of total records), I replaced these values by NA.
+```{r}
+to_be_na <- c("", "appt", "Ask doctor", "BP Normal", "diabetes", "high risk")
+nas <- which(dat[, statin] %in% to_be_na)
+length(nas)
+
+dat <- dat[nas, statin := NA]
+dat <- dat[, statin := as.numeric(statin)]
+dat[, is.numeric(statin)]
+dat[, summary(statin)]
+```
+
+```{r question3, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Patient-Level Summaries
+
+For `r age.name`, `r diabetes.name`, `r hypertension.name`, and `r kidney.disease.name`, what are the average values and standard deviations at baseline?  For `r age.name`, this would be an average in years.  For the disease states, this would be the percentage of the population who have these conditions.
+
+```{r mean_clinical_factors}
+# computing the mean and SD of the age variable
+age_summary <- dat[get(t1.name) == 0, .(Item = eval(age.name), 
+                                        `Mean Value` = as.numeric(lapply(X = .SD, FUN = "mean")), 
+                                        `SD Value` = as.numeric(lapply(X = .SD, FUN = "sd"))), .SDcols = age.name]
+age_summary <- age_summary[, lapply(X = .SD, FUN = "round.numerics", digits = 1)]
+
+# computing the mean and SD of the diseases variable
+dis_names <- c(diabetes.name, hypertension.name, kidney.disease.name)
+dis_summary <- dat[get(t1.name) == 0, .(Item = eval(dis_names), 
+                                        `Mean Value` = as.numeric(lapply(X = .SD, FUN = "mean"))*100, 
+                                        `SD Value` = as.numeric(lapply(X = .SD, FUN = "sd"))), .SDcols = dis_names]
+dis_summary <- dis_summary[, lapply(X = .SD, FUN = "round.numerics", digits = 1)]
+dis_summary <- dis_summary[, `Mean Value`:= paste(`Mean Value`, "%")]
+
+# combining together and displaying in datatable
+summaries <- rbind(age_summary, dis_summary)
+datatable(summaries, rownames = FALSE)
+```
+
+```{r question4, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Counting Outcomes
+
+### Part A
+
+How many heart attacks were there in follow-up?  How many deaths occurred?  
+
+```{r outcome.counts}
+dat[, .(`Follow-up Heart Attacks Count` = sum(get(heart.attack.name)),
+        `Deaths Count` = sum(get(death.name)))]
+```
+
+### Part B
+
+How many total hospitalizations occurred across all of the patients? - a single hospitalization may span multiple rows of data.  Incorporate this count into the previous table.  Compare the value calculated here to the number of rows with hospitalizations.
+
+```{r count_hospitalizations}
+by_patient <- dat[, lapply(X = .SD, FUN = "count.hospitalization"), .SDcol = hospital.name, by = id.name]
+by_patient[, lapply(X = .SD, FUN = "sum"), .SDcol = hospital.name]
+```
+
+
+```{r question5, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Counting Outcomes by Medication Usage
+
+Count the number of deaths, heart attacks, and hospitalizations *split by* medication usage.  Show how many of these outcomes occurred while the patients were taking each medicine (ACE Inhibitors, Beta Blockers, and Statins) -- and while they were not taking them.
+
+```{r split.outcome.counts}
+outcomes_summaries <- rbind(sum.usage.positive(dat, ace.name), sum.usage.negative(dat, ace.name),
+                            sum.usage.positive(dat, beta.blocker.name), sum.usage.negative(dat, beta.blocker.name),
+                            sum.usage.positive(dat, statin.name), sum.usage.negative(dat, statin.name))
+datatable(outcomes_summaries, rownames = FALSE)
+```
+
+```{r question6, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Follow-Up
+
+Each patient may spend some time in follow-up on the medication and other periods not using it.  We want to get a sense of how much these medicines are used relative to the available time.  A **person-year** is defined as one year of observation for one patient.  10 person-years can be accumulated by following one person for 10 years, two for 5 apiece, three for 2, 7, and 1, respectively, or other combinations.  With this in mind, we want to study the utilization of medicines.
+
+- How many total person-years of observation do we have in the records?  What is the average number of years of observation per patient?
+
+```{r follow_up_meditation}
+person_year <- dat[get(ace.name) == 1 | get(beta.blocker.name) == 1 | get(statin.name) == 1,
+                   .(`Person-year Count` = sum(get(t2.name) - get(t1.name))/ one.year), by = id.name]
+person_year_summary <- person_year[, .(`Total Person-year` = sum(get("Person-year Count")), 
+                                       `Mean Person-year` = mean(get("Person-year Count")))]
+person_year_summary[, lapply(X = .SD, FUN = "round.numerics", digits = 1)]
+```
+
+
+```{r question7, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Utilization
+
+- How many person-years did the patients spend on each medicine -- ACE Inhibitors, Beta Blockers, and Statins?  How much time was spent off of them?  How much time was missing from observation?
+
+```{r utilization}
+utilization_summaries <- rbind(utilization(dat, ace.name), utilization(dat, beta.blocker.name), utilization(dat, statin.name))
+datatable(utilization_summaries, rownames = FALSE)
+```
+
+
+```{r question8, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Crude Event Rates
+
+We compared the counts for the outcomes of hospitalization, heart attacks, and death against the relative follow-up time.  Compute the *crude rates* (the mean number of outcomes) per 100 person years of follow-up - showing the overall amount of follow-up time, the number of events for each outcome, and their ratio in units of events per 100 person years. (Defined one year as 365.25 days.)
+
+```{r crude_rates}
+crude_rates <- rbind(crude_event(dat, hospital.name), crude_event(dat, heart.attack.name), crude_event(dat, death.name))
+datatable(crude_rates, rownames = FALSE)
+```
+
+
+```{r question9, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Crude Event Rates By Medication Usage
+
+How do the crude rates of hospitalization, heart attacks, and death per 100 person-years of follow-up differ depending on medication usage?  Show the number of events and crude rates while taking and not taking each medicine:
+
+* ACE Inhibitors
+
+```{r crude.rates.ace}
+crude_ace <- rbind(crude_ace(dat, hospital.name), crude_no_ace(dat, hospital.name),
+                   crude_ace(dat, heart.attack.name), crude_no_ace(dat, heart.attack.name),
+                   crude_ace(dat, death.name), crude_no_ace(dat, death.name))
+datatable(crude_ace, rownames = FALSE)
+```
+
+* Beta Blockers
+
+```{r crude.rates.beta.blocker}
+crude_beta <- rbind(crude_beta(dat, hospital.name), crude_no_beta(dat, hospital.name),
+                    crude_beta(dat, heart.attack.name), crude_no_beta(dat, heart.attack.name),
+                    crude_beta(dat, death.name), crude_no_beta(dat, death.name))
+datatable(crude_beta, rownames = FALSE)
+```
+
+* Statins
+
+```{r crude.rates.statin}
+crude_sta <- rbind(crude_sta(dat, hospital.name), crude_no_sta(dat, hospital.name),
+                   crude_sta(dat, heart.attack.name), crude_no_sta(dat, heart.attack.name),
+                   crude_sta(dat, death.name), crude_no_sta(dat, death.name))
+datatable(crude_sta, rownames = FALSE)
+```
+
+
+```{r question10, echo=FALSE}
+question.counter <- question.counter + 1
+```
+
+## Unadjusted Odds Ratios
+
+What is the impact of each medication?  One way to calculate their impact is with the *unadjusted odds ratio*, which compares the rate of outcomes while taking the medicine to the rate without taking the medicine.  For reference, an odds ratio less than 1 demonstrates that a factor is associated with a reduction in an outcome, a value greater than 1 shows that the factor is associated with an increase in an outcome, and a value close to 1 shows no association.  For each medicine, we computed the unadjusted odds ratios for hospitalization, heart attacks, and death.
+
+* ACE Inhibitors
+
+```{r unadjusted.odds.ratio.ace}
+ace_uor <- crude_ace[, .(`Unadjusted Odds Ratios` = as.numeric(.SD[1,4])/as.numeric(.SD[2,4])), by = Outcomes]
+datatable(ace_uor[, lapply(X = .SD, FUN = "round.numerics", digits = 2)], rownames = FALSE)
+```
+
+Based on the results, ACE Inhibitors do have obvious impact on reducing the numbers of hospitalization, heart attack, and the mortality. We could also see that the impact is slightly larger on reducing the number of death based on the given dataset. (But note that every impact here does not indicate any casuations between this medication and the outcomes.
+
+* Beta Blockers
+
+```{r unadjusted.odds.ratio.beta.blocker}
+beta_uor <- crude_beta[, .(`Unadjusted Odds Ratios` = as.numeric(.SD[1,4])/as.numeric(.SD[2,4])), by = Outcomes]
+datatable(beta_uor[, lapply(X = .SD, FUN = "round.numerics", digits = 2)], rownames = FALSE)
+```
+
+Based on the results, Beta Blockers do have obvious impact on reducing the numbers of hospitalization, heart attack, and the mortality, while the impact is relatively smaller on reducing the number of death based on the given dataset. In addition, comparing the unadjusted odds ratios of this medicine with the other two, Beta Blockers have the highest ratios in all the crude events, which means the performance of this treatment might not be as good as the other two. (But note that every impact here does not indicate any casuations between this medication and the outcomes.
+
+* Statins
+
+```{r unadjusted.odds.ratio.statin}
+sta_uor <- crude_sta[, .(`Unadjusted Odds Ratios` = as.numeric(.SD[1,4])/as.numeric(.SD[2,4])), by = Outcomes]
+datatable(sta_uor[, lapply(X = .SD, FUN = "round.numerics", digits = 2)], rownames = FALSE)
+```
+
+Based on the results, statins do have obvious impact on reducing the numbers of hospitalization, heart attack, and the mortality. We could also see that the impact is slightly larger on reducing the number of death based on the given dataset. Moreover, this medicine has the best performance among the other two, if we only look at the unadjusted odds ratios here. (But note that every impact here does not indicate any casuations between this medication and the outcomes.
